@@ -1,0 +1,13 @@
+node_modules/
+.env
+auth/
+data/
+*.db
+*.db-journal
+.DS_Store
+logs/
+*.log
+
+# Local harness + proprietary prompt source docs (kept out of public repo)
+.claude/
+*.docx
