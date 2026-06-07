@@ -32,6 +32,15 @@ const LANDING_URL = process.env.LANDING_PAGE_URL || 'https://yoursite.com';
 const logger = pino({ level: 'warn' });
 
 let sock = null;
+// Latest WhatsApp pairing QR, exposed so the Express server can render it as a
+// scannable image at /qr (easier than reading the ASCII QR out of deploy logs).
+// Cleared once the connection opens (paired) so the page stops showing a stale QR.
+let latestQR = null;
+let latestQRAt = 0;
+
+export function getLatestQR() {
+  return { qr: latestQR, ts: latestQRAt };
+}
 
 function randomDelay() {
   return MIN_DELAY + Math.floor(Math.random() * (MAX_DELAY - MIN_DELAY));
@@ -238,8 +247,11 @@ export async function startBot() {
     const { connection, lastDisconnect, qr } = update;
 
     if (qr) {
+      latestQR = qr;
+      latestQRAt = Date.now();
       console.log('\n📱 Scan this QR code with your bot WhatsApp:\n');
-      console.log('   (WhatsApp → Settings → Linked Devices → Link a Device)\n');
+      console.log('   (WhatsApp → Settings → Linked Devices → Link a Device)');
+      console.log('   Or open the /qr link printed at startup to scan an image in your browser.\n');
       qrcode.generate(qr, { small: true });
     }
 
@@ -256,6 +268,7 @@ export async function startBot() {
         console.log('🚪 Logged out. Delete auth/ folder and restart to re-pair.');
       }
     } else if (connection === 'open') {
+      latestQR = null; // paired — no QR to show anymore
       console.log('✅ WhatsApp connected as:', sock.user?.id);
     }
   });

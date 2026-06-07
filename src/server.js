@@ -15,6 +15,9 @@ console.log('3. express loaded');
 import crypto from 'crypto';
 console.log('4. crypto loaded');
 
+import QRCode from 'qrcode';
+console.log('4b. qrcode loaded');
+
 import cron from 'node-cron';
 console.log('5. cron loaded');
 
@@ -57,7 +60,44 @@ console.log('14. express app created');
 
 const PORT = process.env.PORT || 3000;
 
+// Per-boot secret so the QR page isn't publicly scannable. Whoever scans the
+// pairing QR links the bot to THEIR WhatsApp, so the page must be gated.
+// Override with QR_ACCESS_TOKEN to keep a stable link across restarts.
+const QR_TOKEN = process.env.QR_ACCESS_TOKEN || crypto.randomUUID();
+
 app.get('/', (req, res) => res.send('ok'));
+
+// Renders the current WhatsApp pairing QR as a scannable image.
+// Open the tokenized link printed at startup, then scan with the bot's phone.
+app.get('/qr', async (req, res) => {
+  if (req.query.t !== QR_TOKEN) {
+    return res.status(403).send('forbidden — use the /qr link from the startup logs');
+  }
+  const { qr, ts } = bot.getLatestQR();
+  if (!qr) {
+    return res.send(
+      '<!doctype html><meta http-equiv="refresh" content="3">' +
+      '<body style="font-family:sans-serif;text-align:center;padding:40px">' +
+      '<h2>No QR right now</h2><p>The bot is either already paired or still starting. ' +
+      'This page refreshes automatically.</p></body>'
+    );
+  }
+  try {
+    const dataUrl = await QRCode.toDataURL(qr, { width: 320, margin: 2 });
+    const ageSec = Math.round((Date.now() - ts) / 1000);
+    res.send(
+      '<!doctype html><meta http-equiv="refresh" content="20">' +
+      '<body style="font-family:sans-serif;text-align:center;padding:40px">' +
+      '<h2>Scan with your bot\'s WhatsApp</h2>' +
+      '<p>WhatsApp → Settings → Linked Devices → Link a Device</p>' +
+      `<img src="${dataUrl}" width="320" height="320" alt="WhatsApp QR"/>` +
+      `<p style="color:#888">QR age: ${ageSec}s · page auto-refreshes every 20s</p>` +
+      '</body>'
+    );
+  } catch (err) {
+    res.status(500).send('failed to render QR: ' + err.message);
+  }
+});
 
 console.log('15. About to start listening on port', PORT);
 const server = app.listen(PORT, () => {
@@ -67,6 +107,14 @@ const server = app.listen(PORT, () => {
 server.on('error', (err) => {
   console.error('17. ❌ Server error:', err.message);
 });
+
+// Build the public QR link. On Railway, RAILWAY_PUBLIC_DOMAIN is set once you
+// generate a domain (Settings → Networking). Locally it falls back to localhost.
+const QR_BASE = process.env.RAILWAY_PUBLIC_DOMAIN
+  ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}`
+  : `http://localhost:${PORT}`;
+console.log(`📱 QR pairing page → ${QR_BASE}/qr?t=${QR_TOKEN}`);
+console.log('   Open that link in a browser tab to scan the QR as an image.');
 
 console.log('18. About to start WhatsApp bot...');
 try {
