@@ -4,7 +4,8 @@ import {
   DisconnectReason,
   fetchLatestBaileysVersion,
   makeCacheableSignalKeyStore,
-  downloadMediaMessage
+  downloadMediaMessage,
+  downloadContentFromMessage
 } from '@whiskeysockets/baileys';
 import { Boom } from '@hapi/boom';
 import qrcode from 'qrcode-terminal';
@@ -105,20 +106,44 @@ function sleep(ms) {
   return new Promise(r => setTimeout(r, ms));
 }
 
-// Some screenshots fail to download on the first try (Baileys media hiccup).
-// Retry once before giving up so clients aren't told "couldn't read it".
+// Robustly download media (screenshots especially). WhatsApp/Baileys downloads
+// fail intermittently — when they do and we proceed anyway, Claude gets text
+// with no image and says "I can't see images". So we try hard and only ever
+// return a NON-EMPTY buffer, else throw (caller then asks the user to resend).
+//   1. high-level helper (handles media re-upload) — retried once
+//   2. low-level stream straight off the media node — the most reliable path
+async function streamToBuffer(stream) {
+  let buffer = Buffer.from([]);
+  for await (const chunk of stream) buffer = Buffer.concat([buffer, chunk]);
+  return buffer;
+}
+
 async function downloadMediaBuffer(msg) {
-  let lastErr;
+  // 1) high-level helper, retried once
   for (let attempt = 1; attempt <= 2; attempt++) {
     try {
-      return await downloadMediaMessage(msg, 'buffer', {}, { logger, reuploadRequest: sock.updateMediaMessage });
+      const b = await downloadMediaMessage(msg, 'buffer', {}, { logger, reuploadRequest: sock.updateMediaMessage });
+      if (b && b.length > 0) return b;
+      console.error(`⚠️  downloadMediaMessage returned empty (attempt ${attempt})`);
     } catch (err) {
-      lastErr = err;
-      console.error(`⚠️  Media download attempt ${attempt} failed: ${err.message}`);
-      if (attempt < 2) await sleep(900);
+      console.error(`⚠️  downloadMediaMessage failed (attempt ${attempt}): ${err.message}`);
     }
+    if (attempt < 2) await sleep(900);
   }
-  throw lastErr;
+
+  // 2) low-level fallback straight off the media node
+  const m = msg.message || {};
+  const node = m.imageMessage || m.documentMessage || m.audioMessage || m.videoMessage;
+  const type = m.imageMessage ? 'image' : m.documentMessage ? 'document' : m.audioMessage ? 'audio' : 'video';
+  if (!node) throw new Error('no media node on message');
+  try {
+    const b = await streamToBuffer(await downloadContentFromMessage(node, type));
+    if (b && b.length > 0) return b;
+    throw new Error('empty buffer from downloadContentFromMessage');
+  } catch (err) {
+    console.error(`⚠️  downloadContentFromMessage fallback failed: ${err.message}`);
+    throw err;
+  }
 }
 
 // Get the actual phone number from a Baileys message.
