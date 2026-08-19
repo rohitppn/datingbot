@@ -105,6 +105,22 @@ function sleep(ms) {
   return new Promise(r => setTimeout(r, ms));
 }
 
+// Some screenshots fail to download on the first try (Baileys media hiccup).
+// Retry once before giving up so clients aren't told "couldn't read it".
+async function downloadMediaBuffer(msg) {
+  let lastErr;
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    try {
+      return await downloadMediaMessage(msg, 'buffer', {}, { logger, reuploadRequest: sock.updateMediaMessage });
+    } catch (err) {
+      lastErr = err;
+      console.error(`⚠️  Media download attempt ${attempt} failed: ${err.message}`);
+      if (attempt < 2) await sleep(900);
+    }
+  }
+  throw lastErr;
+}
+
 // Get the actual phone number from a Baileys message.
 // Handles: regular DMs, LID-format users (Baileys 7.x privacy feature),
 // group messages, and business accounts.
@@ -158,6 +174,15 @@ async function handleMessage(msg) {
   // Extract text + any media (images / voice notes).
   // Images → passed to Claude as vision input.
   // Audio → transcribed via Groq Whisper, then treated as text.
+  // Unwrap view-once / ephemeral / sent-as-document wrappers so the screenshot
+  // inside is actually visible. This is the #1 reason "the bot didn't read it".
+  const inner = msg.message?.ephemeralMessage?.message
+    || msg.message?.viewOnceMessageV2?.message
+    || msg.message?.viewOnceMessageV2Extension?.message
+    || msg.message?.viewOnceMessage?.message
+    || msg.message?.documentWithCaptionMessage?.message;
+  if (inner) msg.message = inner;
+
   let text = null;
   let images = [];
   let storedText = null; // what we save to DB (images get a placeholder)
@@ -169,28 +194,36 @@ async function handleMessage(msg) {
     } else if (msg.message?.extendedTextMessage?.text) {
       text = msg.message.extendedTextMessage.text;
       storedText = text;
-    } else if (msg.message?.imageMessage) {
-      const caption = (msg.message.imageMessage.caption || '').trim();
-      const mimeType = msg.message.imageMessage.mimetype || 'image/jpeg';
+    } else if (msg.message?.imageMessage
+        || (msg.message?.documentMessage && /^image\//i.test(msg.message.documentMessage.mimetype || ''))) {
+      // Screenshots arrive either as a normal image OR as a "document" (file).
+      const node = msg.message.imageMessage || msg.message.documentMessage;
+      const caption = (node.caption || '').trim();
+      const mimeType = (node.mimetype || 'image/jpeg').split(';')[0].trim();
+      console.log(`🖼️  [${phone}] screenshot received (${mimeType})`);
 
-      if (!SUPPORTED_IMAGE_MIMES.has(mimeType.split(';')[0].trim())) {
-        await sock.sendMessage(jid, { text: "I couldn't read that image format — send a JPEG or PNG." });
+      if (!SUPPORTED_IMAGE_MIMES.has(mimeType)) {
+        await sock.sendMessage(jid, { text: "I couldn't read that image format. Please send it as a JPEG or PNG screenshot." });
         return;
       }
 
-      const buffer = await downloadMediaMessage(msg, 'buffer', {}, {
-        logger,
-        reuploadRequest: sock.updateMediaMessage
-      });
+      let buffer;
+      try {
+        buffer = await downloadMediaBuffer(msg);
+      } catch (err) {
+        await sock.sendMessage(jid, { text: "I couldn't open that screenshot. Please send it again as a photo (not a document), or retake it." });
+        return;
+      }
 
       if (buffer.length > MAX_IMAGE_BYTES) {
-        await sock.sendMessage(jid, { text: 'That image is a bit large — compress it and send again.' });
+        await sock.sendMessage(jid, { text: 'That image is a bit large. Please compress it and send it again.' });
         return;
       }
 
-      images.push({ base64: buffer.toString('base64'), mimeType: mimeType.split(';')[0].trim() });
-      text = caption || 'read this screenshot and coach me on what to reply';
+      images.push({ base64: buffer.toString('base64'), mimeType });
+      text = caption || 'read this screenshot of our chat and coach me on exactly what to reply';
       storedText = caption ? `[image] ${caption}` : '[image attached]';
+      console.log(`🖼️  [${phone}] screenshot decoded (${Math.round(buffer.length / 1024)}KB) → sending to Claude vision`);
     } else if (msg.message?.audioMessage) {
       if (!transcriptionEnabled) {
         await sock.sendMessage(jid, { text: "Voice notes aren't supported yet — send it as text." });
@@ -198,10 +231,7 @@ async function handleMessage(msg) {
       }
 
       const mimeType = msg.message.audioMessage.mimetype || 'audio/ogg';
-      const buffer = await downloadMediaMessage(msg, 'buffer', {}, {
-        logger,
-        reuploadRequest: sock.updateMediaMessage
-      });
+      const buffer = await downloadMediaBuffer(msg);
 
       const transcript = await transcribeAudio(buffer, mimeType);
       if (!transcript) {

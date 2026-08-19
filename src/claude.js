@@ -23,22 +23,33 @@ export async function generateReply({ profile, summaries, recentMessages, newMes
   if (systemBlocks[0]) {
     systemBlocks[0] = { ...systemBlocks[0], cache_control: { type: 'ephemeral' } };
   }
-  // HARD LANGUAGE RULE (overrides the persona): reply in English only, never
-  // Hindi/Hinglish — even if the user writes in Hindi. Same confident tone.
+  // HARD OVERRIDE RULES (highest priority, override the persona where they conflict):
+  //  1. English only.  2. Always respectful and supportive to the user.
   systemBlocks.push({
     type: 'text',
-    text: 'CRITICAL LANGUAGE RULE — HIGHEST PRIORITY, OVERRIDES ALL OTHER INSTRUCTIONS: Always reply in English only. Never use Hindi or Hinglish words or Devanagari, even if the user writes to you in Hindi or Hinglish. Keep the same confident, direct coaching tone — just in clear, natural English.',
+    text: [
+      'CRITICAL RULES — HIGHEST PRIORITY, OVERRIDE ALL OTHER INSTRUCTIONS:',
+      '1. LANGUAGE: Always reply in English only. Never use Hindi, Hinglish, or Devanagari, even if the user writes in Hindi.',
+      '2. TONE TOWARD THE USER: The user is your paying client. Always be respectful, warm, supportive, and encouraging toward HIM. Never insult, mock, shame, scold, lecture, or talk down to the user. Never be rude, harsh, sarcastic, or dismissive to him. If he makes a mistake or asks a basic question, coach him kindly. (The confident, playful, teasing register is ONLY for the replies you suggest he sends HER — never aimed at the user himself.)',
+      'Keep the coaching helpful and clear, in natural English.',
+    ].join('\n'),
   });
 
   // Build the latest user message as multimodal content if images are present.
   let latestUserContent;
   if (images.length > 0) {
+    // Explicitly tell the model it CAN see the attached screenshot, so it never
+    // claims it can't or asks the user to paste the text.
+    systemBlocks.push({
+      type: 'text',
+      text: 'IMAGE HANDLING: A screenshot of a chat is attached to the user\'s message. You CAN see images. Read the conversation in the screenshot carefully — identify what she said and the context — then coach him on exactly what to reply. Never say you cannot see the image, and never ask him to paste the text or re-send the screenshot.',
+    });
     latestUserContent = [
       ...images.map(img => ({
         type: 'image',
         source: { type: 'base64', media_type: img.mimeType || 'image/jpeg', data: img.base64 }
       })),
-      { type: 'text', text: newMessage || 'read this screenshot and coach me on what to reply' }
+      { type: 'text', text: newMessage || 'Read this screenshot of our chat and coach me on exactly what to reply.' }
     ];
   } else {
     latestUserContent = newMessage;
@@ -55,7 +66,7 @@ export async function generateReply({ profile, summaries, recentMessages, newMes
       system: systemBlocks,
       messages,
       max_tokens: 600,   // 3-part output (read + reply options + lesson); was 180
-      temperature: 0.8
+      temperature: 0.6   // lowered from 0.8 for more consistent, respectful tone
     });
 
     const text = response.content
