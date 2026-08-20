@@ -20,6 +20,7 @@ import {
 } from './db.js';
 import { checkPaymentStatus } from './sheets.js';
 import { isApproved, getBotConfig } from './supabase.js';
+import { createPaymentLink } from './razorpay.js';
 import { generateReply } from './claude.js';
 import { trialEndedReply } from './knowledge.js';
 import { transcribeAudio, transcriptionEnabled } from './transcribe.js';
@@ -40,6 +41,9 @@ const LANDING_URL = process.env.LANDING_PAGE_URL || 'https://yoursite.com';
 // Dashboard values override these; 0 for messages disables that cap.
 const FREE_MINUTES_ENV = parseInt(process.env.FREE_TRIAL_MINUTES || '10', 10);
 const FREE_MSGS_ENV = parseInt(process.env.FREE_MSG_LIMIT || '20', 10);
+// Paid access: price (paise) and how many days it lasts.
+const FLIRT_PRICE_PAISE = parseInt(process.env.FLIRT_PRICE_PAISE || '99900', 10); // ₹999
+const PAID_DAYS = parseInt(process.env.PAID_DAYS || '30', 10);
 
 const logger = pino({ level: 'warn' });
 
@@ -311,9 +315,17 @@ async function handleMessage(msg) {
     if (overTime || overMsgs) {
       console.log(`🚫 [${phone}] free window over (${elapsedMin.toFixed(1)}min, ${used} msgs) — locking to payment`);
       await sock.sendPresenceUpdate('composing', jid);
+      // Create a per-user Razorpay payment link tagged with their number, so
+      // paying auto-unlocks them. Falls back to the static landing URL if
+      // Razorpay isn't configured.
+      let payUrl = LANDING_URL;
+      try {
+        const link = await createPaymentLink({ phone, amountPaise: FLIRT_PRICE_PAISE, days: PAID_DAYS });
+        if (link) payUrl = link;
+      } catch {}
       await sleep(1200);
-      // Admin-set message from the dashboard ({link} → landing URL); else default.
-      const endText = cfg.trialMessage ? cfg.trialMessage.replace(/\{link\}/g, LANDING_URL) : trialEndedReply(LANDING_URL);
+      // Admin-set message from the dashboard ({link} → payment link); else default.
+      const endText = cfg.trialMessage ? cfg.trialMessage.replace(/\{link\}/g, payUrl) : trialEndedReply(payUrl);
       await sock.sendMessage(jid, { text: endText });
       return; // LOCK: no coaching reply past the free window
     }

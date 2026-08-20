@@ -11,6 +11,38 @@
 
 const URL = (process.env.SUPABASE_URL || '').replace(/\/$/, '');
 const KEY = process.env.SUPABASE_ANON_KEY || '';
+// Service key is used ONLY for the payment webhook write (server-side, never
+// exposed). Keeps the paid-unlock secure — random callers with the public anon
+// key can't mark themselves paid.
+const SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY || '';
+
+// Called by the Razorpay webhook after a successful payment: unlock this number
+// for `days` days (sets leads.paid_until). Matches on last-10-digits.
+export async function markPaid(phone, days = 30) {
+  if (!URL || !SERVICE_KEY || !phone) return false;
+  const p10 = String(phone).replace(/\D/g, '').slice(-10);
+  if (p10.length < 10) return false;
+  const until = new Date(Date.now() + days * 86400000).toISOString();
+  const h = { apikey: SERVICE_KEY, Authorization: `Bearer ${SERVICE_KEY}`, 'Content-Type': 'application/json' };
+  try {
+    // Update the lead if they filled the form...
+    const res = await fetch(`${URL}/rest/v1/leads?phone10=eq.${p10}`, {
+      method: 'PATCH', headers: { ...h, Prefer: 'return=representation' },
+      body: JSON.stringify({ paid_until: until }),
+    });
+    const rows = res.ok ? await res.json() : [];
+    if (Array.isArray(rows) && rows.length > 0) return true;
+    // ...else create a minimal paid row (they paid without filling the form).
+    const ins = await fetch(`${URL}/rest/v1/leads`, {
+      method: 'POST', headers: { ...h, Prefer: 'return=minimal' },
+      body: JSON.stringify({ phone: String(phone), source: 'flirtcoachai', paid_until: until }),
+    });
+    return ins.ok;
+  } catch (e) {
+    console.error('markPaid failed:', e.message);
+    return false;
+  }
+}
 
 // Bot config set from the website dashboard: the "free limit over" message and
 // the free-window limits (minutes / message count). Any field null → bot uses

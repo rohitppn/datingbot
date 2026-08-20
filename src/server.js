@@ -33,6 +33,9 @@ console.log('10. About to import bot.js...');
 const bot = await import('./bot.js');
 console.log('11. bot.js loaded');
 
+const razorpay = await import('./razorpay.js');
+const supa = await import('./supabase.js');
+
 console.log('12. About to import dailyMemoryUpdate.js...');
 const job = await import('./jobs/dailyMemoryUpdate.js');
 console.log('13. dailyMemoryUpdate.js loaded');
@@ -67,6 +70,36 @@ const PORT = process.env.PORT || 3000;
 const QR_TOKEN = process.env.QR_ACCESS_TOKEN || null;
 
 app.get('/', (req, res) => res.send('ok'));
+
+// Razorpay webhook — fires when a user pays. We verify the signature, read the
+// WhatsApp number we stamped into the payment link's notes, and unlock that
+// number for 30 days. Uses raw body (required for signature verification).
+app.post('/razorpay/webhook', express.raw({ type: '*/*' }), async (req, res) => {
+  try {
+    const raw = req.body; // Buffer
+    const sig = req.headers['x-razorpay-signature'];
+    if (!razorpay.verifyWebhook(raw, sig)) {
+      console.warn('⚠️  Razorpay webhook: bad signature');
+      return res.status(400).send('invalid signature');
+    }
+    const evt = JSON.parse(raw.toString('utf8'));
+    if (evt.event === 'payment_link.paid') {
+      const notes = evt.payload?.payment_link?.entity?.notes || {};
+      const phone = notes.phone;
+      const days = parseInt(notes.days || '30', 10);
+      if (phone) {
+        const ok = await supa.markPaid(phone, days);
+        console.log(`💰 payment_link.paid → ${phone} unlocked ${days}d (${ok ? 'ok' : 'FAILED'})`);
+      } else {
+        console.warn('⚠️  paid event had no notes.phone');
+      }
+    }
+    res.json({ ok: true });
+  } catch (e) {
+    console.error('Razorpay webhook error:', e.message);
+    res.status(200).json({ ok: false }); // 200 so Razorpay doesn't retry-storm
+  }
+});
 
 // Renders the current WhatsApp pairing QR as a scannable image.
 // Open the link printed at startup, then scan with the bot's phone.
